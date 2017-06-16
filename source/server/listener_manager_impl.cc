@@ -30,7 +30,7 @@ ProdListenSocketFactory::create(Network::Address::InstanceConstSharedPtr address
   }
 }
 
-ListenerImpl::ListenerImpl(Instance& server, ListenSocketFactory& factory, const Json::Object& json)
+ListenerImpl::ListenerImpl(const Json::Object& json, Instance& server, bool dynamic)
     : Json::Validator(json, Json::Schema::LISTENER_SCHEMA), server_(server),
       address_(Network::Utility::resolveUrl(json.getString("address"))),
       global_scope_(server.stats().createScope("")),
@@ -38,8 +38,8 @@ ListenerImpl::ListenerImpl(Instance& server, ListenSocketFactory& factory, const
       use_proxy_proto_(json.getBoolean("use_proxy_proto", false)),
       use_original_dst_(json.getBoolean("use_original_dst", false)),
       per_connection_buffer_limit_bytes_(
-          json.getInteger("per_connection_buffer_limit_bytes", 1024 * 1024)) {
-
+          json.getInteger("per_connection_buffer_limit_bytes", 1024 * 1024)),
+      name_(json.getString("name", server.random().uuid())), dynamic_(dynamic) {
   // ':' is a reserved char in statsd. Do the translation here to avoid costly inline translations
   // later.
   std::string final_stat_name = fmt::format("listener.{}.", address_->asString());
@@ -102,25 +102,62 @@ ListenerImpl::ListenerImpl(Instance& server, ListenSocketFactory& factory, const
       }
     }
   }
-
-  socket_ = factory.create(address_, bind_to_port_);
 }
 
 bool ListenerImpl::createFilterChain(Network::Connection& connection) {
   return Configuration::FilterChainUtility::buildFilterChain(connection, filter_factories_);
 }
 
-void ListenerManagerImpl::addListener(const Json::Object& json) {
-  listeners_.emplace_back(new ListenerImpl(server_, factory_, json));
+Init::Manager& ListenerImpl::initManager() {
+  // fixfix comment
+  if (dynamic_) {
+    return dynamic_init_manager_;
+  } else {
+    return server_.initManager();
+  }
 }
 
-std::list<std::reference_wrapper<Listener>> ListenerManagerImpl::listeners() {
-  std::list<std::reference_wrapper<Listener>> ret;
-  for (const auto& listener : listeners_) {
-    ret.emplace_back(*listener);
-  }
-  return ret;
+void ListenerImpl::setSocket(Network::ListenSocketPtr&& socket) {
+  ASSERT(!socket_);
+  socket_ = std::move(socket);
 }
+
+void ListenerManagerImpl::addOrUpdateListener(const Json::Object& json) {
+  // fixfix socket fetching logic.
+  // fixfix logging.
+  // fixfix rds delete during init.
+  // fixfix stats
+  std::shared_ptr<ListenerImpl> new_listener = std::make_shared<ListenerImpl>(json, server_, dynamic_mode_);
+  auto existing_active_listener = getListenerByName(active_listeners_, new_listener->name());
+  auto existing_warming_listener = getListenerByName(warming_listeners_, new_listener->name());
+
+  ASSERT(existing_active_listener == active_listeners_.end());
+  ASSERT(existing_warming_listener == warming_listeners_.end());
+
+
+  // fixfix name already exists.
+  // fixfix should not be in warming.
+  new_listener->setSocket(factory_.create(new_listener->address(), new_listener->bindToPort()));
+  active_listeners_.emplace_back(new_listener);
+}
+
+void ListenerManagerImpl::enterDynamicMode(ListenerManagerCallbacks&) {
+  ASSERT(!dynamic_mode_);
+  dynamic_mode_ = true;
+}
+
+std::list<ListenerSharedPtr>::iterator
+ListenerManagerImpl::getListenerByName(std::list<ListenerSharedPtr>& listeners,
+                                       const std::string& name) {
+  for (auto it = listeners.begin(); it != listeners.end(); ++it) {
+    if ((*it)->name() == name) {
+      return it;
+    }
+  }
+  return listeners.end();
+}
+
+void ListenerManagerImpl::removeListener(const std::string&) {}
 
 } // Server
 } // Envoy

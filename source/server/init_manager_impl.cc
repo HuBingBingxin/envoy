@@ -33,6 +33,7 @@ void InitManagerImpl::initialize(std::function<void()> callback) {
 void InitManagerImpl::registerTarget(Init::Target& target) {
   ASSERT(state_ == State::NotInitialized);
   targets_.push_back(&target);
+  // fixfix support recursive initialize.
 }
 
 } // Server
